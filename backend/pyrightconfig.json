@@ -1,0 +1,5 @@
+{
+  "extraPaths": ["../ai-engine"],
+  "reportMissingImports": "warning",
+  "pythonVersion": "3.11"
+}
