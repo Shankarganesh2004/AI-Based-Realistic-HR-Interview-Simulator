@@ -1,0 +1,76 @@
+# Render Blueprint — AI Interview Platform
+# https://render.com/docs/blueprint-spec
+#
+# Usage:
+#   1. Push this repo to GitHub
+#   2. Go to https://dashboard.render.com → New → Blueprint
+#   3. Connect your repo → Render reads this file and creates all services
+#   4. Set environment variables (MongoDB Atlas URI, JWT secret, SMTP creds, Gemini API keys)
+
+services:
+  # ── Backend (FastAPI) ─────────────────────────────
+  - type: web
+    name: ai-interview-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: MONGODB_URL
+        sync: false
+      - key: DATABASE_NAME
+        value: ai_interview_platform
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: JWT_ALGORITHM
+        value: HS256
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: "1440"
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_FALLBACK_API_KEYS
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: GEMINI_FALLBACK_MODELS
+        value: ""
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_FALLBACK_MODELS
+        value: nvidia/nemotron-3-nano-30b-a3b:free,stepfun/step-3.5-flash:free
+      - key: FRONTEND_URL
+        sync: false
+      - key: PUBLIC_URL
+        sync: false
+      - key: SMTP_HOST
+        value: smtp.gmail.com
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
+
+  # ── Frontend (React Static Site) ──────────────────
+  - type: web
+    name: ai-interview-frontend
+    runtime: static
+    buildCommand: cd frontend && npm install && npm run build
+    staticPublishPath: ./frontend/dist
+    pullRequestPreviewsEnabled: true
+    headers:
+      - path: /*
+        name: X-Frame-Options
+        value: SAMEORIGIN
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: VITE_API_URL
+        sync: false
+      - key: VITE_WS_URL
+        sync: false
