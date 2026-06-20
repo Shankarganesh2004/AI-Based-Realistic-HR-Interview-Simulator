@@ -1,0 +1,186 @@
+# ──────────────────────────────────────────────────────────────
+# Azure Infrastructure Setup — One-time setup script
+# Run this once to create all Azure resources
+# ──────────────────────────────────────────────────────────────
+name: Setup Azure Infrastructure
+
+on:
+  workflow_dispatch: # Manual trigger only
+
+env:
+  AZURE_RESOURCE_GROUP: ai-interview-rg
+  LOCATION: eastasia                    # Allowed region for student subscription
+  ACR_NAME: aiinterviewacr             # Must be globally unique
+  CONTAINER_ENV_NAME: ai-interview-env
+  BACKEND_APP_NAME: ai-interview-backend
+  FRONTEND_APP_NAME: ai-interview-frontend
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # ── 0. Register required resource providers ──
+      - name: Register Resource Providers
+        run: |
+          for NS in Microsoft.ContainerRegistry Microsoft.App Microsoft.OperationalInsights; do
+            echo "Registering $NS..."
+            az provider register --namespace $NS
+          done
+          
+          # Poll until all are registered (can take up to 10 minutes)
+          for NS in Microsoft.ContainerRegistry Microsoft.App Microsoft.OperationalInsights; do
+            echo "Waiting for $NS to be Registered..."
+            for i in $(seq 1 60); do
+              STATE=$(az provider show --namespace $NS --query "registrationState" -o tsv)
+              echo "  $NS → $STATE (attempt $i/60)"
+              if [ "$STATE" = "Registered" ]; then
+                break
+              fi
+              sleep 10
+            done
+          done
+          echo "✅ All resource providers registered"
+
+      # ── 1. Create Resource Group ─────────────
+      - name: Create Resource Group
+        run: |
+          az group create \
+            --name ${{ env.AZURE_RESOURCE_GROUP }} \
+            --location ${{ env.LOCATION }}
+
+      # ── 2. Create Azure Container Registry (Basic = ~$5/month) ──
+      - name: Create Container Registry
+        run: |
+          az acr create \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --name ${{ env.ACR_NAME }} \
+            --sku Basic \
+            --admin-enabled true
+
+      # ── 3. Create Container Apps Environment (free) ──
+      - name: Create Container Apps Environment
+        run: |
+          az containerapp env create \
+            --name ${{ env.CONTAINER_ENV_NAME }} \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --location ${{ env.LOCATION }}
+
+      # ── 4. Create Backend Container App ──────
+      - name: Create Backend Container App
+        run: |
+          ACR_USER=$(az acr credential show --name ${{ env.ACR_NAME }} --query username -o tsv)
+          ACR_PASS=$(az acr credential show --name ${{ env.ACR_NAME }} --query "passwords[0].value" -o tsv)
+          
+          for ATTEMPT in 1 2 3; do
+            echo "🔄 Attempt $ATTEMPT/3 — Creating backend container app..."
+            az containerapp create \
+              --name ${{ env.BACKEND_APP_NAME }} \
+              --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+              --environment ${{ env.CONTAINER_ENV_NAME }} \
+              --image mcr.microsoft.com/k8se/quickstart:latest \
+              --target-port 8000 \
+              --ingress external \
+              --min-replicas 0 \
+              --max-replicas 1 \
+              --cpu 2.0 \
+              --memory 4.0Gi \
+              --registry-server ${{ env.ACR_NAME }}.azurecr.io \
+              --registry-username "$ACR_USER" \
+              --registry-password "$ACR_PASS" \
+              --env-vars \
+                MONGODB_URL="${{ secrets.MONGODB_URL }}" \
+                DATABASE_NAME="ai_interview_platform" \
+                JWT_SECRET_KEY="${{ secrets.JWT_SECRET_KEY }}" \
+                JWT_ALGORITHM="HS256" \
+                ACCESS_TOKEN_EXPIRE_MINUTES="1440" \
+                GEMINI_API_KEY="${{ secrets.GEMINI_API_KEY }}" \
+                GEMINI_MODEL="gemini-2.5-flash" \
+                FRONTEND_URL="https://placeholder.azurecontainerapps.io" \
+                SMTP_HOST="${{ secrets.SMTP_HOST }}" \
+                SMTP_PORT="${{ secrets.SMTP_PORT }}" \
+                SMTP_USER="${{ secrets.SMTP_USER }}" \
+                SMTP_PASSWORD="${{ secrets.SMTP_PASSWORD }}" \
+                EMAIL_FROM="${{ secrets.EMAIL_FROM }}" \
+                AGORA_APP_ID="${{ secrets.AGORA_APP_ID }}" \
+                AGORA_APP_CERTIFICATE="${{ secrets.AGORA_APP_CERTIFICATE }}" \
+              && az containerapp update --name ${{ env.BACKEND_APP_NAME }} --resource-group ${{ env.AZURE_RESOURCE_GROUP }} --set-env-vars "GEMINI_FALLBACK_API_KEYS=${{ secrets.GEMINI_FALLBACK_API_KEYS }}" "GEMINI_FALLBACK_MODELS=" "OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}" "OPENROUTER_FALLBACK_MODELS=nvidia/nemotron-3-nano-30b-a3b:free,stepfun/step-3.5-flash:free" \
+              && az containerapp update --name ${{ env.BACKEND_APP_NAME }} --resource-group ${{ env.AZURE_RESOURCE_GROUP }} --set-env-vars "VLLM_ENDPOINT=${{ secrets.VLLM_ENDPOINT }}" "VLLM_MODEL=${{ secrets.VLLM_MODEL }}" "VLLM_ENABLED=${{ secrets.VLLM_ENABLED }}" \
+              && echo "✅ Backend created!" && break \
+              || { echo "⚠️ Attempt $ATTEMPT failed, waiting 30s..."; sleep 30; }
+          done
+
+      # ── 5. Create Frontend Container App ─────
+      - name: Create Frontend Container App
+        run: |
+          ACR_USER=$(az acr credential show --name ${{ env.ACR_NAME }} --query username -o tsv)
+          ACR_PASS=$(az acr credential show --name ${{ env.ACR_NAME }} --query "passwords[0].value" -o tsv)
+          
+          for ATTEMPT in 1 2 3; do
+            echo "🔄 Attempt $ATTEMPT/3 — Creating frontend container app..."
+            az containerapp create \
+              --name ${{ env.FRONTEND_APP_NAME }} \
+              --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+              --environment ${{ env.CONTAINER_ENV_NAME }} \
+              --image mcr.microsoft.com/k8se/quickstart:latest \
+              --target-port 80 \
+              --ingress external \
+              --min-replicas 0 \
+              --max-replicas 1 \
+              --cpu 0.25 \
+              --memory 0.5Gi \
+              --registry-server ${{ env.ACR_NAME }}.azurecr.io \
+              --registry-username "$ACR_USER" \
+              --registry-password "$ACR_PASS" \
+              && echo "✅ Frontend created!" && break \
+              || { echo "⚠️ Attempt $ATTEMPT failed, waiting 30s..."; sleep 30; }
+          done
+
+      # ── 6. Output URLs & Auto-configure ──────
+      - name: Get Application URLs and Configure
+        run: |
+          echo "=== DEPLOYMENT URLS ==="
+          BACKEND_FQDN=$(az containerapp show --name ${{ env.BACKEND_APP_NAME }} --resource-group ${{ env.AZURE_RESOURCE_GROUP }} --query "properties.configuration.ingress.fqdn" -o tsv)
+          FRONTEND_FQDN=$(az containerapp show --name ${{ env.FRONTEND_APP_NAME }} --resource-group ${{ env.AZURE_RESOURCE_GROUP }} --query "properties.configuration.ingress.fqdn" -o tsv)
+          
+          echo "Backend URL:  https://$BACKEND_FQDN"
+          echo "Frontend URL: https://$FRONTEND_FQDN"
+          
+          # Auto-update backend with correct FRONTEND_URL
+          echo ""
+          echo "🔄 Updating backend FRONTEND_URL..."
+          az containerapp update \
+            --name ${{ env.BACKEND_APP_NAME }} \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --set-env-vars \
+              FRONTEND_URL="https://$FRONTEND_FQDN" \
+              PUBLIC_URL="https://$FRONTEND_FQDN"
+          echo "✅ Backend FRONTEND_URL updated!"
+          
+          echo ""
+          echo "========================================="
+          echo "⚠️  IMPORTANT NEXT STEPS:"
+          echo "========================================="
+          echo "1. Add BACKEND_FQDN as a GitHub secret:"
+          echo "   Name:  BACKEND_FQDN"
+          echo "   Value: $BACKEND_FQDN"
+          echo ""
+          echo "2. Add SMTP secrets (for email sending):"
+          echo "   SMTP_HOST      = smtp.gmail.com"
+          echo "   SMTP_PORT      = 587"
+          echo "   SMTP_USER      = your-email@gmail.com"
+          echo "   SMTP_PASSWORD  = your-16-char-app-password (no spaces)"
+          echo "   EMAIL_FROM     = your-email@gmail.com"
+          echo ""
+          echo "3. Add Agora secrets (for real-time interviews):"
+          echo "   AGORA_APP_ID          = your-agora-app-id"
+          echo "   AGORA_APP_CERTIFICATE = your-agora-app-certificate"
+          echo ""
+          echo "4. Run 'Deploy Backend' workflow manually"
+          echo "5. Run 'Deploy Frontend' workflow manually"
+          echo "========================================="

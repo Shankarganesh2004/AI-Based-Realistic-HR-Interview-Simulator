@@ -1,0 +1,67 @@
+# ──────────────────────────────────────────────────────────────
+# Azure Container Apps — Deploy Frontend (React + Nginx)
+# Triggers on push to main when frontend/ files change
+# ──────────────────────────────────────────────────────────────
+name: Deploy Frontend to Azure Container Apps
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/deploy-frontend.yml"
+  workflow_dispatch: # Allow manual trigger
+
+env:
+  AZURE_RESOURCE_GROUP: ai-interview-rg
+  ACR_NAME: aiinterviewacr
+  FRONTEND_APP_NAME: ai-interview-frontend
+  CONTAINER_ENV_NAME: ai-interview-env
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout code ─────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Login to Azure ────────────────────
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # ── 3. Login to ACR ──────────────────────
+      - name: Login to Azure Container Registry
+        run: az acr login --name ${{ env.ACR_NAME }}
+
+      # ── 4. Build & Push Docker image ─────────
+      - name: Build and push frontend image
+        run: |
+          IMAGE_TAG=${{ env.ACR_NAME }}.azurecr.io/ai-interview-frontend:${{ github.sha }}
+          IMAGE_LATEST=${{ env.ACR_NAME }}.azurecr.io/ai-interview-frontend:latest
+          
+          docker build \
+            --build-arg VITE_API_URL=https://${{ secrets.BACKEND_FQDN }}/api \
+            --build-arg VITE_WS_URL=wss://${{ secrets.BACKEND_FQDN }} \
+            --build-arg VITE_LIVEKIT_URL=${{ secrets.LIVEKIT_URL }} \
+            -t $IMAGE_TAG \
+            -t $IMAGE_LATEST \
+            ./frontend
+          
+          docker push $IMAGE_TAG
+          docker push $IMAGE_LATEST
+
+      # ── 5. Deploy to Container App ───────────
+      - name: Deploy to Azure Container Apps
+        run: |
+          az containerapp update \
+            --name ${{ env.FRONTEND_APP_NAME }} \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --image ${{ env.ACR_NAME }}.azurecr.io/ai-interview-frontend:${{ github.sha }} \
+            --set-env-vars \
+              VITE_API_URL="https://${{ secrets.BACKEND_FQDN }}/api" \
+              VITE_WS_URL="wss://${{ secrets.BACKEND_FQDN }}" \
+              VITE_LIVEKIT_URL="${{ secrets.LIVEKIT_URL }}"

@@ -1,0 +1,114 @@
+# ──────────────────────────────────────────────────────────────
+# Azure Container Apps — Deploy Backend (FastAPI)
+# Triggers on push to main when backend/ files change
+# ──────────────────────────────────────────────────────────────
+name: Deploy Backend to Azure Container Apps
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "ai-engine/**"
+      - ".github/workflows/deploy-backend.yml"
+  workflow_dispatch: # Allow manual trigger
+
+env:
+  AZURE_RESOURCE_GROUP: ai-interview-rg
+  ACR_NAME: aiinterviewacr          # Must be globally unique, lowercase, no hyphens
+  BACKEND_APP_NAME: ai-interview-backend
+  CONTAINER_ENV_NAME: ai-interview-env
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout code ─────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Login to Azure ────────────────────
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # ── 3. Login to ACR ──────────────────────
+      - name: Login to Azure Container Registry
+        run: az acr login --name ${{ env.ACR_NAME }}
+
+      # ── 4. Build & Push Docker image ─────────
+      - name: Build and push backend image
+        run: |
+          IMAGE_TAG=${{ env.ACR_NAME }}.azurecr.io/ai-interview-backend:${{ github.sha }}
+          IMAGE_LATEST=${{ env.ACR_NAME }}.azurecr.io/ai-interview-backend:latest
+          
+          docker build -t $IMAGE_TAG -t $IMAGE_LATEST -f backend/Dockerfile .
+          docker push $IMAGE_TAG
+          docker push $IMAGE_LATEST
+
+      # ── 5. Get Frontend URL ──────────────────
+      - name: Get Frontend URL
+        id: urls
+        run: |
+          FRONTEND_FQDN=$(az containerapp show \
+            --name ai-interview-frontend \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --query "properties.configuration.ingress.fqdn" -o tsv 2>/dev/null || echo "")
+          echo "frontend_fqdn=$FRONTEND_FQDN" >> $GITHUB_OUTPUT
+          echo "Frontend FQDN: $FRONTEND_FQDN"
+
+      # ── 6. Deploy to Container App ───────────
+      - name: Deploy to Azure Container Apps
+        run: |
+          FRONTEND_FQDN="${{ steps.urls.outputs.frontend_fqdn }}"
+          FRONTEND_URL="https://${FRONTEND_FQDN:-placeholder.azurecontainerapps.io}"
+          
+          # Debug: show key length (not the key itself)
+          GEMINI_KEY='${{ secrets.GEMINI_API_KEY }}'
+          echo "GEMINI_API_KEY length: ${#GEMINI_KEY}"
+          echo "GEMINI_API_KEY prefix: ${GEMINI_KEY:0:8}..."
+
+          az containerapp update \
+            --name ${{ env.BACKEND_APP_NAME }} \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --image ${{ env.ACR_NAME }}.azurecr.io/ai-interview-backend:${{ github.sha }} \
+            --cpu 2.0 \
+            --memory 4.0Gi \
+            --set-env-vars \
+              MONGODB_URL="${{ secrets.MONGODB_URL }}" \
+              DATABASE_NAME="ai_interview_platform" \
+              JWT_SECRET_KEY="${{ secrets.JWT_SECRET_KEY }}" \
+              JWT_ALGORITHM="HS256" \
+              ACCESS_TOKEN_EXPIRE_MINUTES="1440" \
+              GEMINI_API_KEY="${{ secrets.GEMINI_API_KEY }}" \
+              GEMINI_MODEL="gemini-2.5-flash" \
+              FRONTEND_URL="$FRONTEND_URL" \
+              PUBLIC_URL="$FRONTEND_URL" \
+              SMTP_HOST="${{ secrets.SMTP_HOST }}" \
+              SMTP_PORT="${{ secrets.SMTP_PORT }}" \
+              SMTP_USER="${{ secrets.SMTP_USER }}" \
+              SMTP_PASSWORD="${{ secrets.SMTP_PASSWORD }}" \
+              EMAIL_FROM="${{ secrets.EMAIL_FROM }}" \
+              LIVEKIT_API_KEY="${{ secrets.LIVEKIT_API_KEY }}" \
+              LIVEKIT_API_SECRET="${{ secrets.LIVEKIT_API_SECRET }}"
+
+          # Set fallback LLM credentials
+          az containerapp update \
+            --name ${{ env.BACKEND_APP_NAME }} \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --set-env-vars \
+              "GEMINI_FALLBACK_API_KEYS=${{ secrets.GEMINI_FALLBACK_API_KEYS }}" \
+              "GEMINI_FALLBACK_MODELS=" \
+              "OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}" \
+              "OPENROUTER_FALLBACK_MODELS=nvidia/nemotron-3-nano-30b-a3b:free,stepfun/step-3.5-flash:free"
+
+          # Set vLLM (Modal GPU) fallback environment variables
+          az containerapp update \
+            --name ${{ env.BACKEND_APP_NAME }} \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --set-env-vars \
+              "VLLM_ENDPOINT=${{ secrets.VLLM_ENDPOINT }}" \
+              "VLLM_MODEL=${{ secrets.VLLM_MODEL }}" \
+              "VLLM_ENABLED=${{ secrets.VLLM_ENABLED }}"
